@@ -1,0 +1,228 @@
+---
+title: "Exercise5"
+output: html_document
+date: "2024-03-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+library(tidyverse) 
+library(stringr) 
+library(tidytext) 
+library(topicmodels) 
+library(gutenbergr) 
+library(scales)
+library(tm)
+library(ggthemes) 
+library(readr)
+library(quanteda)
+library(quanteda.textmodels)
+library(preText)
+```
+
+```{r}
+##Exercise 5 by Yunqiao Tian and Xinrui He. We decided to discuss and complete each question together, so all three questions were discussed and answered by us together.
+##Question1: Choose another book
+##We choose the book “Pride and Prejudice by Jane Austen”, E-book number is 42671
+tocq <- gutenberg_download(c(42671), 
+                            meta_fields = "author")
+```
+
+```{r}
+tocq_words <- tocq %>%
+  unnest_tokens(word, text) %>%
+  filter(!is.na(word))
+```
+
+```{r}
+##delet the stop words
+tocq_words <- tocq %>%
+  unnest_tokens(word, text) %>%
+  filter(!is.na(word)) %>%
+  count(gutenberg_id==42671, word, sort = TRUE) %>%
+  ungroup() %>%
+  anti_join(stop_words)
+```
+
+```{r}
+##Convert the book to "DocumentTermMatrix”
+tocq_dtm <- tocq_words %>%
+  cast_dtm(gutenberg_id==42671, word, n)
+
+tm::inspect(tocq_dtm)
+##Then we found the main topics are some names
+```
+```{r}
+##extract the per-topic-per-word probabilities, called "β" from the model, and we choose the top 10 term
+tocq_lda <- LDA(tocq_dtm, k = 10, control = list(seed = 1234))
+tocq_topics <- tidy(tocq_lda, matrix = "beta")
+
+head(tocq_topics, n = 10)
+```
+
+```{r}
+##Plot the results, in terms of beta, for each topic as follows:
+tocq_top_terms <- tocq_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+tocq_top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free", ncol = 4) +
+  scale_y_reordered() +
+  theme_tufte(base_family = "Helvetica")
+```
+
+```{r}
+## Question2: Evaluating topic model---Split into chapter documents
+#Because the book we choose only have one Volume，so we decide to check the accuracy through spliting the words into chapter documents, then check the word frequency in different chapter.
+tidy_tocq <- tocq %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words)
+```
+
+```{r}
+tidy_tocq %>%
+  count(word, sort = TRUE)
+```
+
+```{r}
+tocq <- tocq %>%
+  filter(!is.na(text))
+
+# Divide into documents, each representing one chapter
+tocq_chapter <- tocq %>%
+  mutate(chapter = cumsum(str_detect(text, regex("^chapter ", ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  filter(chapter > 0) %>%
+  unite(document, chapter)
+
+# Split into words
+tocq_chapter_word <- tocq_chapter %>%
+  unnest_tokens(word, text)
+
+# Find document-word counts
+tocq_word_counts <- tocq_chapter_word %>%
+  anti_join(stop_words) %>%
+  count(document, word, sort = TRUE) %>%
+  ungroup()
+```
+
+```{r}
+tocq_word_counts
+```
+
+```{r}
+# Cast into DTM format for LDA analysis
+
+tocq_chapters_dtm <- tocq_word_counts %>%
+  cast_dtm(document, word, n)
+
+tm::inspect(tocq_chapters_dtm)
+```
+
+```{r}
+##We then re-estimate the topic model with this new DocumentTermMatrix object, specifying k equal to 2. This will enable us to evaluate whether a topic model is able to generatively assign to volume with accuracy
+tocq_chapters_lda <- LDA(tocq_chapters_dtm, k = 2, control = list(seed = 1234))
+```
+
+```{r}
+tocq_chapters_gamma <- tidy(tocq_chapters_lda, matrix = "gamma")
+tocq_chapters_gamma
+```
+
+```{r}
+ ##Examine consensus
+# First separate the document name into title and chapter
+
+tocq_chapters_gamma <- tocq_chapters_gamma %>%
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE)
+
+tocq_chapter_classifications <- tocq_chapters_gamma %>%
+  group_by(title, chapter) %>%
+  top_n(1, gamma) %>%
+  ungroup()
+
+tocq_book_topics <- tocq_chapter_classifications %>%
+  count(title, topic) %>%
+  group_by(title) %>%
+  top_n(1, n) %>%
+  ungroup() %>%
+  transmute(consensus = title, topic)
+
+tocq_chapter_classifications %>%
+  inner_join(tocq_book_topics, by = "topic") %>%
+  filter(title != consensus)
+```
+```{r}
+##Look document-word pairs were to see which words in each documents were assigned
+# to a given topic
+
+assignments <- augment(tocq_chapters_lda, data = tocq_chapters_dtm)
+assignments
+##Because the book we choose only have one Volume, so we can not plot the results of how well our unsupervised learning did at distinguishing the different volumes generatively just from the words contained in each chapter.
+```
+
+```{r}
+##Question3 Validation
+##reformat our text into a quanteda corpus object
+# load in corpus of Tocequeville text data.
+corp <- corpus(tocq, text_field = "text")
+num_documents <- length(corp)
+# use first 10 documents for example
+sample_size <- min(10, num_documents)  
+documents <- corp[sample(1:num_documents, sample_size)]
+# take a look at the document names
+print(names(documents[1:10]))
+```
+
+```{r}
+##preprocessing the text in 128 different ways
+preprocessed_documents <- factorial_preprocessing(
+    documents,
+    use_ngrams = TRUE,
+    infrequent_term_threshold = 0.2,
+    verbose = FALSE)
+```
+
+```{r}
+##get the results of our pre-processing, comparing the distance between documents that have been processed in different ways
+preText_results <- preText(
+    preprocessed_documents,
+    dataset_name = "Tocqueville text",
+    distance_method = "cosine",
+    num_comparisons = 20,
+    verbose = FALSE)
+```
+
+```{r}
+##Plot the results
+preText_score_plot(preText_results)
+```
